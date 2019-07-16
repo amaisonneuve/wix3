@@ -9,12 +9,34 @@
 #define DBINITCONSTANTS
 #include "sqlutil.h"
 
+
+//Please note that only SQL native client 11 has TLS1.2 support
+#define _SQLNCLI_OLEDB_DEPRECATE_WARNING
+
+#if !defined(SQLNCLI_VER)
+#define SQLNCLI_VER 1100
+#endif
+
+#if SQLNCLI_VER >= 1100
+#if defined(_SQLNCLI_OLEDB_) || !defined(_SQLNCLI_ODBC_)
+#define SQLNCLI_CLSID                           CLSID_SQLNCLI11
+#endif // defined(_SQLNCLI_OLEDB_) || !defined(_SQLNCLI_ODBC_)
+extern const GUID OLEDBDECLSPEC _SQLNCLI_OLEDB_DEPRECATE_WARNING CLSID_SQLNCLI11 = { 0x397C2819L,0x8272,0x4532,{ 0xAD,0x3A,0xFB,0x5E,0x43,0xBE,0xAA,0x39 } };
+#endif  // SQLNCLI_VER >= 1100
+
 // private prototypes
+static HRESULT InitializeDatabaseConnection(
+    __in REFCLSID rclsid,
+    __in_z LPCSTR szFriendlyClsidName,
+    __in DBPROPSET rgdbpsetInit[],
+    __in_ecount(rgdbpsetInit) DWORD cdbpsetInit,
+    __out IDBCreateSession** ppidbSession
+    );
+HRESULT DumpErrorRecords();
 static HRESULT FileSpecToString(
     __in const SQL_FILESPEC* psf,
     __out LPWSTR* ppwz
     );
-
 static HRESULT EscapeSqlIdentifier(
     __in_z LPCWSTR wzDatabase,
     __deref_out_z LPWSTR* ppwz
@@ -23,7 +45,6 @@ static HRESULT EscapeSqlIdentifier(
 
 /********************************************************************
  SqlConnectDatabase - establishes a connection to a database
-
  NOTE: wzInstance is optional
        if fIntegratedAuth is set then wzUser and wzPassword are ignored
 ********************************************************************/
@@ -40,21 +61,10 @@ extern "C" HRESULT DAPI SqlConnectDatabase(
     Assert(wzServer && wzDatabase && *wzDatabase && ppidbSession);
 
     HRESULT hr = S_OK;
-    IDBInitialize* pidbInitialize = NULL;
-    IDBProperties* pidbProperties = NULL;
-
     LPWSTR pwzServerInstance = NULL;
-    DBPROP rgdbpInit[4];
-    DBPROPSET rgdbpsetInit[1];
+    DBPROP rgdbpInit[4] = { };
+    DBPROPSET rgdbpsetInit[1] = { };
     ULONG cProperties = 0;
-
-    memset(rgdbpInit, 0, sizeof(rgdbpInit));
-    memset(rgdbpsetInit, 0, sizeof(rgdbpsetInit));
-
-    //obtain access to the SQLOLEDB provider
-    hr = ::CoCreateInstance(CLSID_SQLOLEDB, NULL, CLSCTX_INPROC_SERVER,
-                            IID_IDBInitialize, (LPVOID*)&pidbInitialize);
-    ExitOnFailure(hr, "failed to create IID_IDBInitialize object");
 
     // if there is an instance
     if (wzInstance && *wzInstance)
@@ -122,17 +132,23 @@ extern "C" HRESULT DAPI SqlConnectDatabase(
     rgdbpsetInit[0].rgProperties = rgdbpInit;
     rgdbpsetInit[0].cProperties = cProperties;
 
-    // create and set the property set
-    hr = pidbInitialize->QueryInterface(IID_IDBProperties, (LPVOID*)&pidbProperties);
-    ExitOnFailure(hr, "failed to get IID_IDBProperties object");
-    hr = pidbProperties->SetProperties(1, rgdbpsetInit); 
-    ExitOnFailure(hr, "failed to set properties");
+    // obtain access to the SQL Native Client provider
+    hr = InitializeDatabaseConnection(SQLNCLI_CLSID, "SQL Native Client", rgdbpsetInit, countof(rgdbpsetInit), ppidbSession);
+    if (FAILED(hr))
+    {
+        ExitTrace(hr, "Could not initialize SQL Native Client, falling back to SQL OLE DB...");
 
-    //initialize connection to datasource
-    hr = pidbInitialize->Initialize();
-    ExitOnFailure1(hr, "failed to initialize connection to database: %ls", wzDatabase);
-
-    hr = pidbInitialize->QueryInterface(IID_IDBCreateSession, (LPVOID*)ppidbSession);
+        // try OLE DB but if that fails return original error failure
+        HRESULT hr2 = InitializeDatabaseConnection(CLSID_SQLOLEDB, "SQL OLE DB", rgdbpsetInit, countof(rgdbpsetInit), ppidbSession);
+        if (FAILED(hr2))
+        {
+            ExitTrace(hr2, "Could not initialize SQL OLE DB either, giving up.");
+        }
+        else
+        {
+            hr = S_OK;
+        }
+    }
 
 LExit:
     for (; 0 < cProperties; cProperties--)
@@ -140,8 +156,6 @@ LExit:
         ::VariantClear(&rgdbpInit[cProperties - 1].vValue);
     }
 
-    ReleaseObject(pidbProperties);
-    ReleaseObject(pidbInitialize);
     ReleaseStr(pwzServerInstance);
 
     return hr;
@@ -150,7 +164,6 @@ LExit:
 
 /********************************************************************
  SqlStartTransaction - Starts a new transaction that must be ended
-
 *********************************************************************/
 extern "C" HRESULT DAPI SqlStartTransaction(
     __in IDBCreateSession* pidbSession,
@@ -177,7 +190,6 @@ LExit:
 
 /********************************************************************
  SqlEndTransaction - Ends the transaction
-
  NOTE: if fCommit, will commit the transaction, otherwise rolls back
 *********************************************************************/
 extern "C" HRESULT DAPI SqlEndTransaction(
@@ -208,7 +220,6 @@ LExit:
 
 /********************************************************************
  SqlDatabaseExists - determines if database exists
-
  NOTE: wzInstance is optional
        if fIntegratedAuth is set then wzUser and wzPassword are ignored
        returns S_OK if database exist
@@ -244,7 +255,6 @@ LExit:
 
 /********************************************************************
  SqlSessionDatabaseExists - determines if database exists
-
  NOTE: pidbSession must be connected to master database
        returns S_OK if database exist
        returns S_FALSE if database does not exist
@@ -299,7 +309,6 @@ LExit:
 
 /********************************************************************
  SqlDatabaseEnsureExists - creates a database if it does not exist
-
  NOTE: wzInstance is optional
        if fIntegratedAuth is set then wzUser and wzPassword are ignored
 ********************************************************************/
@@ -339,7 +348,6 @@ LExit:
 
 /********************************************************************
  SqlSessionDatabaseEnsureExists - creates a database if it does not exist
-
  NOTE: pidbSession must be connected to the master database
 ********************************************************************/
 extern "C" HRESULT DAPI SqlSessionDatabaseEnsureExists(
@@ -373,7 +381,6 @@ LExit:
 
 /********************************************************************
  SqlCreateDatabase - creates a database on the server
-
  NOTE: wzInstance is optional
        if fIntegratedAuth is set then wzUser and wzPassword are ignored
 ********************************************************************/
@@ -413,7 +420,6 @@ LExit:
 
 /********************************************************************
  SqlSessionCreateDatabase - creates a database on the server
-
  NOTE: pidbSession must be connected to the master database
 ********************************************************************/
 extern "C" HRESULT DAPI SqlSessionCreateDatabase(
@@ -463,7 +469,6 @@ LExit:
 
 /********************************************************************
  SqlDropDatabase - removes a database from a server if it exists
-
  NOTE: wzInstance is optional
        if fIntegratedAuth is set then wzUser and wzPassword are ignored
 ********************************************************************/
@@ -499,7 +504,6 @@ LExit:
 
 /********************************************************************
  SqlSessionDropDatabase - removes a database from a server if it exists
-
  NOTE: pidbSession must be connected to the master database
 ********************************************************************/
 extern "C" HRESULT DAPI SqlSessionDropDatabase(
@@ -539,7 +543,6 @@ LExit:
 
 /********************************************************************
  SqlSessionExecuteQuery - executes a query and returns the results if desired
-
  NOTE: ppirs and pcRoes and pbstrErrorDescription are optional
 ********************************************************************/
 extern "C" HRESULT DAPI SqlSessionExecuteQuery(
@@ -616,7 +619,6 @@ LExit:
 
 /********************************************************************
  SqlCommandExecuteQuery - executes a SQL command and returns the results if desired
-
  NOTE: ppirs and pcRoes are optional
 ********************************************************************/
 extern "C" HRESULT DAPI SqlCommandExecuteQuery(
@@ -678,7 +680,6 @@ LExit:
 
 /********************************************************************
  SqlGetErrorInfo - gets error information from the last SQL function call
-
  NOTE: pbstrErrorSource and pbstrErrorDescription are optional
 ********************************************************************/
 extern "C" HRESULT DAPI SqlGetErrorInfo(
@@ -772,9 +773,112 @@ LExit:
 // private
 //
 
+static HRESULT InitializeDatabaseConnection(
+    __in REFCLSID rclsid,
+    __in_z LPCSTR szFriendlyClsidName,
+    __in DBPROPSET rgdbpsetInit[],
+    __in_ecount(rgdbpsetInit) DWORD cdbpsetInit,
+    __out IDBCreateSession** ppidbSession
+)
+{
+    Unused(szFriendlyClsidName); // only used in DEBUG builds
+
+    HRESULT hr = S_OK;
+    IDBInitialize* pidbInitialize = NULL;
+    IDBProperties* pidbProperties = NULL;
+
+    hr = ::CoCreateInstance(rclsid, NULL, CLSCTX_INPROC_SERVER, IID_IDBInitialize, (LPVOID*)&pidbInitialize);
+    ExitOnFailure(hr, "failed to initialize %s", szFriendlyClsidName);
+
+    // create and set the property set
+    hr = pidbInitialize->QueryInterface(IID_IDBProperties, (LPVOID*)&pidbProperties);
+    ExitOnFailure(hr, "failed to get IID_IDBProperties for %s", szFriendlyClsidName);
+
+    hr = pidbProperties->SetProperties(cdbpsetInit, rgdbpsetInit);
+    ExitOnFailure(hr, "failed to set properties for %s", szFriendlyClsidName);
+
+    // initialize connection to datasource
+    hr = pidbInitialize->Initialize();
+    if (FAILED(hr))
+    {
+        DumpErrorRecords();
+    }
+    ExitOnFailure(hr, "failed to initialize connection for %s", szFriendlyClsidName);
+
+    hr = pidbInitialize->QueryInterface(IID_IDBCreateSession, (LPVOID*)ppidbSession);
+    ExitOnFailure(hr, "failed to query for connection session for %s", szFriendlyClsidName);
+
+LExit:
+    ReleaseObject(pidbProperties);
+    ReleaseObject(pidbInitialize);
+
+    return hr;
+}
+
+HRESULT DumpErrorRecords()
+{
+    HRESULT hr = S_OK;
+    IErrorInfo* pIErrorInfo = NULL;
+    IErrorRecords* pIErrorRecords = NULL;
+    IErrorInfo* pIErrorInfoRecord = NULL;
+    BSTR bstrDescription = NULL;
+    ULONG i = 0;
+    ULONG cRecords = 0;
+    ERRORINFO ErrorInfo = { };
+
+    // Get IErrorInfo pointer from OLE.  
+    hr = ::GetErrorInfo(0, &pIErrorInfo);
+    if (FAILED(hr))
+    {
+        ExitFunction();
+    }
+
+    // QI for IID_IErrorRecords.  
+    hr = pIErrorInfo->QueryInterface(IID_IErrorRecords, (void**)&pIErrorRecords);
+    if (FAILED(hr))
+    {
+        ExitFunction();
+    }
+
+    // Get error record count.  
+    hr = pIErrorRecords->GetRecordCount(&cRecords);
+    if (FAILED(hr))
+    {
+        ExitFunction();
+    }
+
+    // Loop through the error records.
+    for (i = 0; i < cRecords; i++)
+    {
+        // Get pIErrorInfo from pIErrorRecords.
+        hr = pIErrorRecords->GetErrorInfo(i, 1033, &pIErrorInfoRecord);
+
+        if (SUCCEEDED(hr))
+        {
+            // Get error description and source.
+            hr = pIErrorInfoRecord->GetDescription(&bstrDescription);
+
+            // Retrieve the ErrorInfo structures.
+            hr = pIErrorRecords->GetBasicErrorInfo(i, &ErrorInfo);
+
+            ExitTrace(ErrorInfo.hrError, "SQL error %lu/%lu: %ls", i + 1, cRecords, bstrDescription);
+
+            ReleaseNullObject(pIErrorInfoRecord);
+            ReleaseNullBSTR(bstrDescription);
+        }
+    }
+
+LExit:
+    ReleaseNullBSTR(bstrDescription);
+    ReleaseObject(pIErrorInfoRecord);
+    ReleaseObject(pIErrorRecords);
+    ReleaseObject(pIErrorInfo);
+
+    return hr;
+}
+
 /********************************************************************
  FileSpecToString
-
 *********************************************************************/
 static HRESULT FileSpecToString(
     __in const SQL_FILESPEC* psf,

@@ -64,12 +64,12 @@
       Code="WIXBUILDINIT"
       Condition=" '$(OFFICIAL_WIX_BUILD)'=='' and ($(DisabledWixStrongName32) == 'ABSENT' or $(DisabledWixStrongName64) == 'ABSENT') "
       Text="Strong name validation for the WiX toolset must be disabled on a developer machine to build. Execute 'msbuild $(MSBuildThisFileDirectory)OneTimeWixBuildInitialization.proj' from an elevated command prompt." />
-
+<!--
     <Error
       Code="WIXBUILD000"
       Condition=" '$(OFFICIAL_WIX_BUILD)'!='' and !($(VS2010Available) and $(VS2012Available) and $(VS2013Available) and $(VS2015Available) and $(VS2017Available))"
       Text="All versions of VS are required on an official build. Install VS2010, VS2012, VS2013, VS2015, and VS2017." />
-
+-->
     <Error
       Code="WIXBUILD001"
       Condition=" !Exists('$(AssemblyOriginatorKeyFile)') "
